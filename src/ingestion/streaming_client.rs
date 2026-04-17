@@ -15,6 +15,9 @@ use sui_rpc::proto::sui::rpc::v2::subscription_service_client::SubscriptionServi
 use sui_types::digests::ChainIdentifier;
 use sui_types::messages_checkpoint::CheckpointDigest;
 use tonic::Status;
+use tonic::metadata::Ascii;
+use tonic::metadata::MetadataKey;
+use tonic::metadata::MetadataValue;
 use tonic::transport::Endpoint;
 use tonic::transport::Uri;
 
@@ -35,24 +38,59 @@ pub trait CheckpointStreamingClient {
     async fn connect(&mut self) -> Result<CheckpointStream>;
 }
 
+/// Parse a `key:value` argument from the CLI into a `(String, String)` tuple.
+///
+/// Used by `clap` to populate `streaming_headers`. Header keys are case-insensitive in
+/// HTTP/2 / gRPC (and tonic lowercases them on the wire), but we preserve the user's casing
+/// here for round-tripping.
+fn parse_header(arg: &str) -> std::result::Result<(String, String), String> {
+    let (key, value) = arg
+        .split_once(':')
+        .ok_or_else(|| format!("expected `key:value`, got `{arg}`"))?;
+    let key = key.trim();
+    let value = value.trim();
+    if key.is_empty() {
+        return Err(format!("header key is empty in `{arg}`"));
+    }
+    Ok((key.to_owned(), value.to_owned()))
+}
+
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct StreamingClientArgs {
     /// gRPC endpoint for streaming checkpoints
     #[clap(long, env)]
     pub streaming_url: Option<Uri>,
+
+    /// Custom HTTP headers attached to every gRPC request, e.g.
+    /// `--streaming-header x-api-key:secret`. Repeat the flag to send multiple
+    /// headers. Each value must be of the form `key:value`.
+    #[clap(long = "streaming-header", value_parser = parse_header, action = clap::ArgAction::Append)]
+    pub streaming_headers: Vec<(String, String)>,
 }
 
 /// gRPC-based implementation of the CheckpointStreamingClient trait.
 pub struct GrpcStreamingClient {
     uri: Uri,
     connection_timeout: Duration,
+    headers: Vec<(String, String)>,
 }
 
 impl GrpcStreamingClient {
+    /// Construct a client without any custom headers (preserves the upstream signature).
     pub fn new(uri: Uri, connection_timeout: Duration) -> Self {
+        Self::with_headers(uri, connection_timeout, Vec::new())
+    }
+
+    /// Construct a client that attaches the given gRPC metadata headers to every request.
+    pub fn with_headers(
+        uri: Uri,
+        connection_timeout: Duration,
+        headers: Vec<(String, String)>,
+    ) -> Self {
         Self {
             uri,
             connection_timeout,
+            headers,
         }
     }
 }
@@ -62,9 +100,40 @@ impl CheckpointStreamingClient for GrpcStreamingClient {
     async fn connect(&mut self) -> Result<CheckpointStream> {
         let endpoint = Endpoint::from(self.uri.clone()).connect_timeout(self.connection_timeout);
 
-        let mut client = SubscriptionServiceClient::connect(endpoint)
+        // Validate headers up-front so we can emit a clear error if any are malformed,
+        // and so we own them by value (the interceptor closure must be `'static + Send`).
+        let mut parsed_headers: Vec<(MetadataKey<Ascii>, MetadataValue<Ascii>)> =
+            Vec::with_capacity(self.headers.len());
+        for (key, value) in &self.headers {
+            let metadata_key: MetadataKey<Ascii> = key.parse().map_err(|err| {
+                Error::StreamingError(anyhow!("invalid gRPC header key `{key}`: {err}"))
+            })?;
+            let metadata_value: MetadataValue<Ascii> = value.parse().map_err(|err| {
+                Error::StreamingError(anyhow!(
+                    "invalid gRPC header value for `{key}`: {err}"
+                ))
+            })?;
+            parsed_headers.push((metadata_key, metadata_value));
+        }
+
+        let channel = endpoint
+            .connect()
             .await
-            .map_err(|err| Error::RpcClientError(Status::from_error(err.into())))?
+            .map_err(|err| Error::RpcClientError(Status::from_error(err.into())))?;
+
+        // Always wrap in an interceptor; when no headers are configured the closure is a
+        // no-op, which avoids needing two divergent client types in this method.
+        let interceptor = move |mut req: tonic::Request<()>| -> std::result::Result<
+            tonic::Request<()>,
+            Status,
+        > {
+            for (key, value) in &parsed_headers {
+                req.metadata_mut().insert(key.clone(), value.clone());
+            }
+            Ok(req)
+        };
+
+        let mut client = SubscriptionServiceClient::with_interceptor(channel, interceptor)
             .max_decoding_message_size(MAX_GRPC_MESSAGE_SIZE_BYTES);
 
         let mut request = SubscribeCheckpointsRequest::default();
