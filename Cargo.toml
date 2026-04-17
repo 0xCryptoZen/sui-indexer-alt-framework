@@ -1,0 +1,105 @@
+[package]
+name = "sui-indexer-alt-framework"
+version = "0.1.0"
+authors = ["Mysten Labs <build@mystenlabs.com>", "Cetus <opensource@cetus.zone>"]
+license = "Apache-2.0"
+edition = "2024"
+description = "Single-crate fork of MystenLabs/sui sui-indexer-alt-framework, pinned to mainnet-v1.69.2 (rev 33ef98b2). Tracks upstream; carries Cetus patches on top."
+repository = "https://github.com/cetus-org/sui-indexer-alt-framework"
+publish = false
+
+# Pinned to MystenLabs/sui rev: 33ef98b2337036b06f9da3927715a411dcddfc40 (mainnet-v1.69.2)
+# Sister crates (sui-types, sui-rpc, sui-rpc-api, sui-indexer-alt-framework-store-traits,
+# sui-indexer-alt-metrics, sui-storage, sui-field-count, sui-futures) are pulled directly
+# from upstream MystenLabs/sui at the same rev — they are NOT vendored into this fork.
+# sui-rpc / sui-sdk-types come from MystenLabs/sui-rust-sdk at the rev that the upstream
+# sui workspace pins.
+
+[dependencies]
+anyhow = "1.0.71"
+async-trait = "0.1.61"
+axum = { version = "0.8", default-features = false, features = [
+  "macros",
+  "tokio",
+  "http1",
+  "http2",
+  "json",
+  "matched-path",
+  "original-uri",
+  "form",
+  "query",
+  "ws",
+] }
+backoff = { version = "0.4.0", features = [
+  "futures",
+  "futures-core",
+  "pin-project-lite",
+  "tokio",
+  "tokio_1",
+] }
+bb8 = "0.8.5"
+bytes = { version = "1.11.1", features = ["serde"] }
+chrono = { version = "=0.4.39", features = ["clock", "serde"] }
+clap = { version = "4.4", features = ["derive", "wrap_help", "env"] }
+diesel = { version = "2.2", features = ["chrono"] }
+diesel-async = { version = "0.5", features = ["bb8", "postgres", "async-connection-wrapper"] }
+diesel_migrations = "2.2"
+futures = "0.3.28"
+num_cpus = "1.15.0"
+object_store = { version = "0.13.0", features = ["aws", "gcp", "azure", "http"] }
+pin-project-lite = "0.2.13"
+prometheus = { version = "0.14", features = ["protobuf"] }
+prost = "0.14.1"
+prost-types = "0.14.1"
+rand = "0.8.5"
+scoped-futures = "0.1.3"
+serde = { version = "1.0.144", features = ["derive", "rc"] }
+serde_json = { version = "1.0.95", features = ["preserve_order"] }
+tempfile = "3.20.0"
+thiserror = "1.0.40"
+tokio = { version = "=1.49.0", features = ["full"] }
+tokio-stream = { version = "0.1.14", features = ["sync", "net"] }
+tonic = { version = "0.14.3", features = ["zstd", "transport", "tls-webpki-roots"] }
+tracing = "0.1.37"
+tracing-subscriber = { version = "0.3.22", default-features = false, features = [
+  "std",
+  "smallvec",
+  "fmt",
+  "ansi",
+  "time",
+  "json",
+  "registry",
+  "env-filter",
+], optional = true }
+url = "2.3.1"
+zstd = "0.12.3"
+
+# Sister Sui crates — pulled from upstream at the same rev (NOT vendored).
+sui-field-count = { git = "https://github.com/MystenLabs/sui", rev = "33ef98b2337036b06f9da3927715a411dcddfc40" }
+sui-futures = { git = "https://github.com/MystenLabs/sui", rev = "33ef98b2337036b06f9da3927715a411dcddfc40" }
+sui-indexer-alt-framework-store-traits = { git = "https://github.com/MystenLabs/sui", rev = "33ef98b2337036b06f9da3927715a411dcddfc40" }
+sui-indexer-alt-metrics = { git = "https://github.com/MystenLabs/sui", rev = "33ef98b2337036b06f9da3927715a411dcddfc40" }
+sui-rpc-api = { git = "https://github.com/MystenLabs/sui", rev = "33ef98b2337036b06f9da3927715a411dcddfc40" }
+sui-storage = { git = "https://github.com/MystenLabs/sui", rev = "33ef98b2337036b06f9da3927715a411dcddfc40" }
+sui-types = { git = "https://github.com/MystenLabs/sui", rev = "33ef98b2337036b06f9da3927715a411dcddfc40" }
+
+# core-types from sui-rust-sdk — the rev matches what upstream sui workspace pins.
+sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e5c53de2e9570229b63bd0508b43f27c11cb5f76", features = ["hash", "serde"] }
+sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e5c53de2e9570229b63bd0508b43f27c11cb5f76" }
+
+# Cluster / postgres-only optional deps. We do NOT enable the `cluster` feature
+# by default in this fork (chainflow-indexer disables default features), so the
+# `sui-pg-db` dep remains optional.
+sui-pg-db = { git = "https://github.com/MystenLabs/sui", rev = "33ef98b2337036b06f9da3927715a411dcddfc40", optional = true }
+
+[dev-dependencies]
+telemetry-subscribers = { git = "https://github.com/MystenLabs/sui", rev = "33ef98b2337036b06f9da3927715a411dcddfc40" }
+wiremock = "0.5"
+dashmap = "5.5.3"
+sui-synthetic-ingestion = { git = "https://github.com/MystenLabs/sui", rev = "33ef98b2337036b06f9da3927715a411dcddfc40" }
+sui-pg-db = { git = "https://github.com/MystenLabs/sui", rev = "33ef98b2337036b06f9da3927715a411dcddfc40" }
+
+[features]
+default = []
+cluster = ["dep:tracing-subscriber", "postgres"]
+postgres = ["dep:sui-pg-db"]
