@@ -98,7 +98,18 @@ impl GrpcStreamingClient {
 #[async_trait]
 impl CheckpointStreamingClient for GrpcStreamingClient {
     async fn connect(&mut self) -> Result<CheckpointStream> {
-        let endpoint = Endpoint::from(self.uri.clone()).connect_timeout(self.connection_timeout);
+        let mut endpoint =
+            Endpoint::from(self.uri.clone()).connect_timeout(self.connection_timeout);
+
+        // For HTTPS endpoints we must enable TLS explicitly; otherwise tonic
+        // refuses with `HttpsUriWithoutTlsSupport` even when the binary is
+        // compiled with `tls-ring` + `tls-webpki-roots`.
+        if self.uri.scheme_str() == Some("https") {
+            let tls = tonic::transport::ClientTlsConfig::new().with_enabled_roots();
+            endpoint = endpoint
+                .tls_config(tls)
+                .map_err(|err| Error::StreamingError(anyhow!("tls_config failed: {err}")))?;
+        }
 
         // Validate headers up-front so we can emit a clear error if any are malformed,
         // and so we own them by value (the interceptor closure must be `'static + Send`).
