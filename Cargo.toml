@@ -1,6 +1,6 @@
 [package]
 name = "sui-indexer-alt-framework"
-version = "0.1.0"
+version = "1.80.1"
 authors = ["Mysten Labs <build@mystenlabs.com>", "Cetus <opensource@cetus.zone>"]
 license = "Apache-2.0"
 edition = "2024"
