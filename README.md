@@ -20,7 +20,11 @@ into its own repository, we can:
 
 ## Pinned upstream rev
 
-`33ef98b2337036b06f9da3927715a411dcddfc40` (mainnet-v1.69.2)
+`782577ca40c9ef0b3f400ade8bc2cc2dcd0e2b23` (mainnet-v1.80.1)
+
+The framework ingestion implementation retains the Cetus streaming header/TLS
+patches. Sui and SDK dependencies are aligned with this release to decode
+`TransactionExpiration::Validity` (introduced on mainnet in v1.79).
 
 The `Cargo.toml` in this repo pins every sister Sui crate to that exact rev.
 

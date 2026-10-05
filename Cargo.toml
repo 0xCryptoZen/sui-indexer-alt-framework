@@ -39,7 +39,7 @@ backoff = { version = "0.4.0", features = [
 ] }
 bb8 = "0.8.5"
 bytes = { version = "1.11.1", features = ["serde"] }
-chrono = { version = "=0.4.39", features = ["clock", "serde"] }
+chrono = { version = "0.4.44", features = ["clock", "serde"] }
 clap = { version = "4.4", features = ["derive", "wrap_help", "env"] }
 diesel = { version = "2.2", features = ["chrono"] }
 diesel-async = { version = "0.5", features = ["bb8", "postgres", "async-connection-wrapper"] }
@@ -57,9 +57,9 @@ serde = { version = "1.0.144", features = ["derive", "rc"] }
 serde_json = { version = "1.0.95", features = ["preserve_order"] }
 tempfile = "3.20.0"
 thiserror = "1.0.40"
-tokio = { version = "=1.49.0", features = ["full"] }
+tokio = { version = "=1.52.1", features = ["full"] }
 tokio-stream = { version = "0.1.14", features = ["sync", "net"] }
-tonic = { version = "0.14.3", features = ["zstd", "transport", "tls-ring", "tls-webpki-roots"] }
+tonic = { version = "0.14.6", features = ["zstd", "transport", "tls-ring", "tls-webpki-roots"] }
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.22", default-features = false, features = [
   "std",
