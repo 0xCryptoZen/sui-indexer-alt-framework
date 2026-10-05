@@ -1,23 +1,21 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::pin::Pin;
 use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::anyhow;
 use async_trait::async_trait;
-use futures::Stream;
 use futures::StreamExt;
+use futures::stream::BoxStream;
 use sui_rpc::headers::X_SUI_CHAIN_ID;
 use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
 use sui_rpc::proto::sui::rpc::v2::subscription_service_client::SubscriptionServiceClient;
 use sui_types::digests::ChainIdentifier;
 use sui_types::messages_checkpoint::CheckpointDigest;
+use tokio_stream::adapters::Peekable;
 use tonic::Status;
-use tonic::metadata::Ascii;
-use tonic::metadata::MetadataKey;
-use tonic::metadata::MetadataValue;
+use tonic::metadata::{Ascii, MetadataKey, MetadataValue};
 use tonic::transport::Endpoint;
 use tonic::transport::Uri;
 
@@ -27,7 +25,7 @@ use crate::ingestion::error::Result;
 use crate::types::full_checkpoint_content::Checkpoint;
 
 pub struct CheckpointStream {
-    pub stream: Pin<Box<dyn Stream<Item = Result<Checkpoint>> + Send>>,
+    pub stream: Peekable<BoxStream<'static, Result<Checkpoint>>>,
     pub chain_id: ChainIdentifier,
 }
 
@@ -35,7 +33,18 @@ pub struct CheckpointStream {
 #[async_trait]
 pub trait CheckpointStreamingClient {
     /// Returns the CheckpointStream and chain id.
-    async fn connect(&mut self) -> Result<CheckpointStream>;
+    async fn connect(&self) -> Result<CheckpointStream>;
+
+    /// Returns the latest checkpoint number available from the streaming source.
+    async fn latest_checkpoint_number(&self) -> Result<u64> {
+        let mut stream = self.connect().await?;
+
+        match stream.stream.next().await {
+            Some(Ok(checkpoint)) => Ok(checkpoint.summary.sequence_number),
+            Some(Err(e)) => Err(e),
+            None => Err(Error::StreamingError(anyhow!("Stream ended unexpectedly"))),
+        }
+    }
 }
 
 /// Parse a `key:value` argument from the CLI into a `(String, String)` tuple.
@@ -61,35 +70,35 @@ pub struct StreamingClientArgs {
     #[clap(long, env)]
     pub streaming_url: Option<Uri>,
 
-    /// Custom HTTP headers attached to every gRPC request, e.g.
-    /// `--streaming-header x-api-key:secret`. Repeat the flag to send multiple
-    /// headers. Each value must be of the form `key:value`.
+    /// Authentication metadata attached to checkpoint subscriptions.
     #[clap(long = "streaming-header", value_parser = parse_header, action = clap::ArgAction::Append)]
     pub streaming_headers: Vec<(String, String)>,
 }
 
 /// gRPC-based implementation of the CheckpointStreamingClient trait.
+#[derive(Clone)]
 pub struct GrpcStreamingClient {
     uri: Uri,
     connection_timeout: Duration,
+    statement_timeout: Duration,
     headers: Vec<(String, String)>,
 }
 
 impl GrpcStreamingClient {
-    /// Construct a client without any custom headers (preserves the upstream signature).
-    pub fn new(uri: Uri, connection_timeout: Duration) -> Self {
-        Self::with_headers(uri, connection_timeout, Vec::new())
+    pub fn new(uri: Uri, connection_timeout: Duration, statement_timeout: Duration) -> Self {
+        Self::with_headers(uri, connection_timeout, statement_timeout, Vec::new())
     }
 
-    /// Construct a client that attaches the given gRPC metadata headers to every request.
     pub fn with_headers(
         uri: Uri,
         connection_timeout: Duration,
+        statement_timeout: Duration,
         headers: Vec<(String, String)>,
     ) -> Self {
         Self {
             uri,
             connection_timeout,
+            statement_timeout,
             headers,
         }
     }
@@ -97,9 +106,10 @@ impl GrpcStreamingClient {
 
 #[async_trait]
 impl CheckpointStreamingClient for GrpcStreamingClient {
-    async fn connect(&mut self) -> Result<CheckpointStream> {
-        let mut endpoint =
-            Endpoint::from(self.uri.clone()).connect_timeout(self.connection_timeout);
+    async fn connect(&self) -> Result<CheckpointStream> {
+        let mut endpoint = Endpoint::from(self.uri.clone())
+            .connect_timeout(self.connection_timeout)
+            .timeout(self.connection_timeout);
 
         // For HTTPS endpoints we must enable TLS explicitly; otherwise tonic
         // refuses with `HttpsUriWithoutTlsSupport` even when the binary is
@@ -120,9 +130,7 @@ impl CheckpointStreamingClient for GrpcStreamingClient {
                 Error::StreamingError(anyhow!("invalid gRPC header key `{key}`: {err}"))
             })?;
             let metadata_value: MetadataValue<Ascii> = value.parse().map_err(|err| {
-                Error::StreamingError(anyhow!(
-                    "invalid gRPC header value for `{key}`: {err}"
-                ))
+                Error::StreamingError(anyhow!("invalid gRPC header value for `{key}`: {err}"))
             })?;
             parsed_headers.push((metadata_key, metadata_value));
         }
@@ -134,15 +142,13 @@ impl CheckpointStreamingClient for GrpcStreamingClient {
 
         // Always wrap in an interceptor; when no headers are configured the closure is a
         // no-op, which avoids needing two divergent client types in this method.
-        let interceptor = move |mut req: tonic::Request<()>| -> std::result::Result<
-            tonic::Request<()>,
-            Status,
-        > {
-            for (key, value) in &parsed_headers {
-                req.metadata_mut().insert(key.clone(), value.clone());
-            }
-            Ok(req)
-        };
+        let interceptor =
+            move |mut req: tonic::Request<()>| -> std::result::Result<tonic::Request<()>, Status> {
+                for (key, value) in &parsed_headers {
+                    req.metadata_mut().insert(key.clone(), value.clone());
+                }
+                Ok(req)
+            };
 
         let mut client = SubscriptionServiceClient::with_interceptor(channel, interceptor)
             .max_decoding_message_size(MAX_GRPC_MESSAGE_SIZE_BYTES);
@@ -165,30 +171,126 @@ impl CheckpointStreamingClient for GrpcStreamingClient {
             .map_err(|e| Error::StreamingError(anyhow!("Chain ID parse error: {e}")))?
             .into();
 
-        let converted_stream = response.into_inner().map(|result| match result {
-            Ok(response) => response
-                .checkpoint
-                .context("Checkpoint data missing in response")
-                .and_then(|checkpoint| {
-                    Checkpoint::try_from(&checkpoint).context("Failed to parse checkpoint")
-                })
-                .map_err(Error::StreamingError),
-            Err(e) => Err(Error::RpcClientError(e)),
+        let stream = response
+            .into_inner()
+            .map(|result| async move {
+                match result {
+                    Ok(response) => {
+                        let checkpoint = response
+                            .checkpoint
+                            .context("Checkpoint data missing in response")
+                            .map_err(Error::StreamingError)?;
+                        // Proto -> Checkpoint conversion is multi-ms of CPU work;
+                        // offload to the blocking pool so it doesn't stall the reactor.
+                        // Combined with `.buffered(4)` below, up to 4 decodes can run
+                        // concurrently while new bytes keep flowing from gRPC.
+                        tokio::task::spawn_blocking(move || {
+                            Checkpoint::try_from(&checkpoint).context("Failed to parse checkpoint")
+                        })
+                        .await
+                        .map_err(|e| Error::StreamingError(anyhow!("decode task panicked: {e}")))?
+                        .map_err(Error::StreamingError)
+                    }
+                    Err(e) => Err(Error::RpcClientError(e)),
+                }
+            })
+            .buffered(4);
+        let stream = wrap_stream(stream, self.statement_timeout);
+
+        Ok(CheckpointStream { stream, chain_id })
+    }
+}
+
+/// Wraps a stream with a per-item timeout. Converts the resulting `Err(Elapsed)` into
+/// `Err(StreamingError)` if it occurs.
+fn wrap_stream(
+    stream: impl futures::Stream<Item = Result<Checkpoint>> + Send + 'static,
+    statement_timeout: Duration,
+) -> Peekable<BoxStream<'static, Result<Checkpoint>>> {
+    let stream = tokio_stream::StreamExt::timeout(stream, statement_timeout)
+        .map(move |result| match result {
+            Err(_elapsed) => Err(Error::StreamingError(anyhow!(
+                "Statement timeout after {statement_timeout:?}"
+            ))),
+            Ok(result) => result,
+        })
+        .boxed();
+    tokio_stream::StreamExt::peekable(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+    use std::time::Duration;
+
+    use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
+    use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsResponse;
+    use sui_rpc::proto::sui::rpc::v2::subscription_service_server::SubscriptionService;
+    use sui_rpc::proto::sui::rpc::v2::subscription_service_server::SubscriptionServiceServer;
+    use tonic::transport::Server;
+
+    use super::*;
+
+    /// A gRPC server that accepts connections but never responds to
+    /// subscribe_checkpoints, simulating a stalled RPC handshake.
+    struct HangingSubscriptionService;
+
+    #[tonic::async_trait]
+    impl SubscriptionService for HangingSubscriptionService {
+        async fn subscribe_checkpoints(
+            &self,
+            _request: tonic::Request<SubscribeCheckpointsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<
+                BoxStream<'static, std::result::Result<SubscribeCheckpointsResponse, Status>>,
+            >,
+            Status,
+        > {
+            futures::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn subscribe_checkpoints_times_out_on_stalled_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+            Server::builder()
+                .add_service(SubscriptionServiceServer::new(HangingSubscriptionService))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
         });
 
-        Ok(CheckpointStream {
-            stream: Box::pin(converted_stream),
-            chain_id,
-        })
+        let timeout = Duration::from_millis(200);
+        let uri: Uri = format!("http://{addr}").parse().unwrap();
+        let client = GrpcStreamingClient::new(uri, timeout, timeout);
+
+        let start = std::time::Instant::now();
+        let result = client.connect().await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "expected timeout error");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "connect() took {elapsed:?}, should have timed out in ~200ms"
+        );
     }
 }
 
 #[cfg(test)]
 pub mod test_utils {
+    use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
     use std::time::Instant;
+
+    use futures::Stream;
 
     use crate::types::test_checkpoint_data_builder::TestCheckpointBuilder;
 
@@ -258,9 +360,12 @@ pub mod test_utils {
     /// Mock streaming client for testing with predefined checkpoints.
     pub struct MockStreamingClient {
         actions: Arc<Mutex<Vec<StreamAction>>>,
-        connection_failures_remaining: usize,
-        connection_timeouts_remaining: usize,
+        connection_failures_remaining: AtomicUsize,
+        connection_timeouts_remaining: AtomicUsize,
+        /// How long mock timeout actions hang (must be > statement_timeout for timeouts to fire).
         timeout_duration: Duration,
+        /// Statement timeout applied to the stream wrapper.
+        statement_timeout: Duration,
     }
 
     impl MockStreamingClient {
@@ -272,6 +377,7 @@ pub mod test_utils {
         where
             I: IntoIterator<Item = u64>,
         {
+            let timeout_duration = timeout_duration.unwrap_or(Duration::from_secs(5));
             Self {
                 actions: Arc::new(Mutex::new(
                     checkpoint_range
@@ -279,21 +385,22 @@ pub mod test_utils {
                         .map(StreamAction::Checkpoint)
                         .collect(),
                 )),
-                connection_failures_remaining: 0,
-                connection_timeouts_remaining: 0,
-                timeout_duration: timeout_duration.unwrap_or(Duration::from_secs(5)),
+                connection_failures_remaining: AtomicUsize::new(0),
+                connection_timeouts_remaining: AtomicUsize::new(0),
+                statement_timeout: timeout_duration / 2,
+                timeout_duration,
             }
         }
 
         /// Make `connect` fail for the next N calls
         pub fn fail_connection_times(mut self, times: usize) -> Self {
-            self.connection_failures_remaining = times;
+            self.connection_failures_remaining = AtomicUsize::new(times);
             self
         }
 
         /// Make `connect` timeout for the next N calls
         pub fn fail_connection_with_timeout(mut self, times: usize) -> Self {
-            self.connection_timeouts_remaining = times;
+            self.connection_timeouts_remaining = AtomicUsize::new(times);
             self
         }
 
@@ -333,27 +440,28 @@ pub mod test_utils {
 
     #[async_trait]
     impl CheckpointStreamingClient for MockStreamingClient {
-        async fn connect(&mut self) -> Result<CheckpointStream> {
-            if self.connection_timeouts_remaining > 0 {
-                self.connection_timeouts_remaining -= 1;
+        async fn connect(&self) -> Result<CheckpointStream> {
+            if self.connection_timeouts_remaining.load(Ordering::Relaxed) > 0 {
+                self.connection_timeouts_remaining
+                    .fetch_sub(1, Ordering::Relaxed);
                 // Simulate a connection timeout
                 tokio::time::sleep(self.timeout_duration).await;
                 return Err(Error::StreamingError(anyhow::anyhow!(
                     "Mock connection timeout"
                 )));
             }
-            if self.connection_failures_remaining > 0 {
-                self.connection_failures_remaining -= 1;
+            if self.connection_failures_remaining.load(Ordering::Relaxed) > 0 {
+                self.connection_failures_remaining
+                    .fetch_sub(1, Ordering::Relaxed);
                 return Err(Error::StreamingError(anyhow::anyhow!(
                     "Mock connection failure"
                 )));
             }
-            let stream = Box::pin(MockStreamState {
+            let stream_state = MockStreamState {
                 actions: Arc::clone(&self.actions),
-            });
-
+            };
             Ok(CheckpointStream {
-                stream,
+                stream: wrap_stream(stream_state, self.statement_timeout),
                 chain_id: Self::mock_chain_id(),
             })
         }
