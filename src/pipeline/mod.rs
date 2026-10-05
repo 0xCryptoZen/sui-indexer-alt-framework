@@ -22,6 +22,7 @@ pub mod sequential;
 const WARN_PENDING_WATERMARKS: usize = 10000;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(default)]
 pub struct CommitterConfig {
     /// Number of concurrent writers per pipeline.
     pub write_concurrency: usize,
@@ -34,6 +35,28 @@ pub struct CommitterConfig {
 
     /// Maximum random jitter to add to the watermark interval, in milliseconds.
     pub watermark_interval_jitter_ms: u64,
+}
+
+/// Per-pipeline ingestion settings.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct IngestionConfig {
+    /// Capacity of this pipeline's bounded subscriber channel. If `None`, the built-in default
+    /// is used (see [`IngestionConfig::subscriber_channel_size`]).
+    pub subscriber_channel_size: Option<usize>,
+}
+
+impl IngestionConfig {
+    /// Resolves `subscriber_channel_size` to its final value, substituting the built-in default
+    /// if unset.
+    ///
+    /// The default is small on purpose: the adaptive controller does the real backpressure work,
+    /// and larger values just pin more decoded checkpoints in memory without throughput benefit.
+    /// Scales with CPU count for fetch parallelism headroom, with a floor of 4 so the
+    /// controller's dead band (0.6..0.85) has integer room to maneuver on small machines.
+    pub fn subscriber_channel_size(&self) -> usize {
+        self.subscriber_channel_size
+            .unwrap_or_else(|| (num_cpus::get() / 2).max(4))
+    }
 }
 
 /// Processed values associated with a single checkpoint. This is an internal type used to
