@@ -79,12 +79,9 @@ sui-field-count = { git = "https://github.com/MystenLabs/sui", rev = "782577ca40
 sui-futures = { git = "https://github.com/MystenLabs/sui", rev = "782577ca40c9ef0b3f400ade8bc2cc2dcd0e2b23" }
 sui-indexer-alt-framework-store-traits = { git = "https://github.com/MystenLabs/sui", rev = "782577ca40c9ef0b3f400ade8bc2cc2dcd0e2b23" }
 sui-indexer-alt-metrics = { git = "https://github.com/MystenLabs/sui", rev = "782577ca40c9ef0b3f400ade8bc2cc2dcd0e2b23" }
-sui-rpc-api = { git = "https://github.com/MystenLabs/sui", rev = "782577ca40c9ef0b3f400ade8bc2cc2dcd0e2b23" }
-sui-storage = { git = "https://github.com/MystenLabs/sui", rev = "782577ca40c9ef0b3f400ade8bc2cc2dcd0e2b23" }
 sui-types = { git = "https://github.com/MystenLabs/sui", rev = "782577ca40c9ef0b3f400ade8bc2cc2dcd0e2b23" }
 
 # core-types from sui-rust-sdk — the rev matches what upstream sui workspace pins.
-sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "618b6c8484a2394f73d9b5e21cce0ac228b2cf31", features = ["hash", "serde"] }
 sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "618b6c8484a2394f73d9b5e21cce0ac228b2cf31", features = ["unstable"] }
 
 # Cluster / postgres-only optional deps. We do NOT enable the `cluster` feature
